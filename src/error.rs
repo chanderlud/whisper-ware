@@ -2,6 +2,7 @@ use cpal::{BuildStreamError, DefaultStreamConfigError, DevicesError, PlayStreamE
 use kanal::{ReceiveError, SendError};
 use std::fmt::{Display, Formatter};
 use std::io;
+use std::mem::discriminant;
 
 #[derive(Debug)]
 pub(crate) struct Error {
@@ -27,6 +28,14 @@ pub(crate) enum ErrorKind {
     NoInputDevice,
     EditorMissing,
 }
+
+impl PartialEq for ErrorKind {
+    fn eq(&self, other: &Self) -> bool {
+        discriminant(self) == discriminant(other)
+    }
+}
+
+impl Eq for ErrorKind {}
 
 impl From<SendError> for Error {
     fn from(err: SendError) -> Self {

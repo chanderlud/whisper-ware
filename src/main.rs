@@ -192,6 +192,8 @@ fn app() -> Result<()> {
     spawn(move || {
         // only allows the plugin to be initialized once
         let mut initialize = true;
+        // only log each error once
+        let mut last_error: Option<ErrorKind> = None;
 
         loop {
             match backend(&cpal_host, &mut instance, &run_clone, &mut initialize) {
@@ -203,7 +205,12 @@ fn app() -> Result<()> {
                         debug!("audio device change occurred");
                         continue;
                     }
-                    _ => (),
+                    error => {
+                        if last_error.as_ref() != Some(&error) {
+                            error!("backend error: {error:?}");
+                        }
+                        last_error = Some(error);
+                    },
                 },
             }
 
