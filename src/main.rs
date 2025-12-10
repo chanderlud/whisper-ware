@@ -1,27 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#![allow(deprecated)]
 
-use std::fs::create_dir_all;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{Device, default_host};
+use kanal::{Receiver, Sender, bounded, unbounded};
+use lazy_static::lazy_static;
+use log::{LevelFilter, debug, error, info, warn};
+use minimal_windows_gui as win;
+use minimal_windows_gui::class::Class;
+use minimal_windows_gui::message::Message;
+use minimal_windows_gui::window::Window;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex, RwLock};
-use std::thread::spawn;
+use std::thread::{sleep, spawn};
 use std::time::Duration;
-
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{default_host, Device};
-use kanal::{bounded, Receiver, Sender};
-use lazy_static::lazy_static;
-use log::{error, info, warn, LevelFilter};
-use minimal_windows_gui as win;
-use minimal_windows_gui::class::Class;
-use minimal_windows_gui::message::Message;
-use minimal_windows_gui::window::Window;
-use ratelimit::Ratelimiter;
 use tray_icon::menu::{MenuEvent, MenuItem};
-use tray_icon::{menu::Menu, Icon, TrayIconBuilder};
+use tray_icon::{Icon, TrayIconBuilder, menu::Menu};
 use vst::host::{Host, HostBuffer, PluginInstance, PluginLoader};
 use vst::prelude::Plugin;
 use winapi::shared::minwindef::LPARAM;
@@ -30,11 +26,12 @@ use winapi::um::processthreadsapi::GetCurrentProcess;
 use winapi::um::processthreadsapi::SetPriorityClass;
 use winapi::um::winbase::HIGH_PRIORITY_CLASS;
 use winapi::um::winuser::{
-    SendMessageA, ShowWindow, UpdateWindow, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_SETCURSEL,
-    SW_HIDE, SW_SHOW,
+    LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_SETCURSEL, SW_HIDE, SW_SHOW, SendMessageA,
+    ShowWindow, UpdateWindow,
 };
 
-use crate::config::AtomicConfig;
+use crate::config::{AtomicConfig, config_saver};
+use crate::device_callback::wait_for_audio_device_change;
 use crate::error::ErrorKind;
 
 // block non windows builds
@@ -42,6 +39,7 @@ use crate::error::ErrorKind;
 compile_error!("This application only supports Windows.");
 
 mod config;
+mod device_callback;
 mod error;
 
 type Result<T> = std::result::Result<T, error::Error>;
@@ -49,16 +47,23 @@ type Result<T> = std::result::Result<T, error::Error>;
 /// the size of the audio frames used for processing
 const BLOCK_SIZE: usize = 512;
 /// the class name for windowing
-const CLASS_NAME: &str = "audioEnhancement";
+const CLASS_NAME: &str = "whisperWare";
 /// the control ids for the device manager
 const IDC_INPUT_SELECT: u16 = 101;
 const IDC_OUTPUT_SELECT: u16 = 102;
+const SILENCE: [f32; 2] = [0_f32, 0_f32];
 
 // shared values accessed in callbacks
 lazy_static! {
     static ref INPUT_DEVICES: RwLock<Vec<String>> = Default::default();
     static ref OUTPUT_DEVICES: RwLock<Vec<String>> = Default::default();
-    static ref CONFIG: Arc<AtomicConfig> = Arc::new(AtomicConfig::default());
+    static ref CONFIG: Arc<AtomicConfig> = {
+        let (sender, receiver) = unbounded();
+        let config = Arc::new(AtomicConfig::new(sender));
+        let config_clone = Arc::clone(&config);
+        spawn(move || config_saver(config_clone, receiver));
+        config
+    };
 }
 
 /// the host for the compressor plugin
@@ -72,37 +77,8 @@ impl Host for CompressorHost {
 }
 
 fn main() -> Result<()> {
-    let config_dir = dirs::config_dir()
-        .ok_or(ErrorKind::ConfigDir)?
-        .join("WhisperWare");
-
-    if !config_dir.exists() {
-        create_dir_all(&config_dir)?;
-    }
-
     simple_logging::log_to_file("whisper_ware.log", LevelFilter::Warn)?;
-
-    match AtomicConfig::new(config_dir.join("config.json")) {
-        Ok(config) => CONFIG.update_from(&config)?,
-        Err(error) => {
-            error!("Failed to load configuration: {}", error);
-
-            win::messagebox::message_box(
-                "Whisper Ware config loading failed",
-                &error.to_string(),
-                &[win::messagebox::Config::IconError],
-            )?;
-
-            return Ok(());
-        }
-    }
-
-    let config_clone = Arc::clone(&CONFIG);
-    spawn(move || {
-        if let Err(error) = config_clone.save_thread() {
-            error!("config save failed {}", error);
-        }
-    });
+    log_panics::init();
 
     unsafe {
         let process = GetCurrentProcess();
@@ -189,8 +165,6 @@ fn app() -> Result<()> {
     let manager_open: Arc<AtomicBool> = Default::default();
     // the host for the audio recording and playback
     let cpal_host = Arc::new(default_host());
-    // controls how frequently the backend can restart
-    let ratelimiter = Ratelimiter::builder(1, Duration::from_secs(1)).build()?;
 
     // references for the menu event handler
     let run_clone = Arc::clone(&run);
@@ -217,17 +191,23 @@ fn app() -> Result<()> {
 
     spawn(move || {
         // only allows the plugin to be initialized once
-        let mut initilize = true;
+        let mut initialize = true;
 
         loop {
-            if let Err(sleep) = ratelimiter.try_wait() {
-                std::thread::sleep(sleep);
-                continue;
+            match backend(&cpal_host, &mut instance, &run_clone, &mut initialize) {
+                Ok(()) => (),
+                Err(error) => match error.kind {
+                    ErrorKind::NoInputDevice | ErrorKind::NoOutputDevice => {
+                        debug!("waiting for audio device change");
+                        wait_for_audio_device_change();
+                        debug!("audio device change occurred");
+                        continue;
+                    }
+                    _ => (),
+                },
             }
 
-            if let Err(error) = backend(&cpal_host, &mut instance, &run_clone, &mut initilize) {
-                error!("an error occurred in the backend: {}", error);
-            }
+            sleep(Duration::from_millis(100));
         }
     });
 
@@ -246,48 +226,44 @@ fn backend(
     run: &Arc<AtomicBool>,
     initialize: &mut bool,
 ) -> Result<()> {
-    let (input_device, output_device) = CONFIG.devices()?;
-
+    let (input_device_name, output_device_name) = CONFIG.devices();
     let mut input_devices = host.input_devices()?;
+    let mut output_devices = host.output_devices()?;
 
-    let input_device = if input_device == "Default" {
+    let input_device = if input_device_name == "Default" {
         host.default_input_device()
             .ok_or(ErrorKind::NoInputDevice)?
     } else {
         input_devices
-            .find(|device| device_by_name(device, &input_device))
+            .find(|device| device_by_name(device, &input_device_name))
             .ok_or(ErrorKind::NoInputDevice)?
     };
 
-    info!("input device: {:?}", input_device.name());
-
-    let mut output_devices = host.output_devices()?;
-
-    let output_device = if output_device == "Default" {
+    let output_device = if output_device_name == "Default" {
         host.default_output_device()
             .ok_or(ErrorKind::NoOutputDevice)?
     } else {
         output_devices
-            .find(|device| device_by_name(device, &output_device))
+            .find(|device| device_by_name(device, &output_device_name))
             .ok_or(ErrorKind::NoOutputDevice)?
     };
 
     info!("output device: {:?}", output_device.name());
+    info!("input device: {:?}", input_device.name());
 
     let input_config = input_device.default_input_config()?;
-    let input_sample_rate = input_config.sample_rate().0 as f32;
-    let input_channels = input_config.channels() as usize;
-
     let output_config = output_device.default_output_config()?;
+    let input_sample_rate = input_config.sample_rate().0 as f32;
     let output_sample_rate = output_config.sample_rate().0 as f32;
+    let input_channels = input_config.channels() as usize;
     let output_channels = output_config.channels() as usize;
 
     if input_sample_rate != output_sample_rate {
-        return Err(
-            ErrorKind::InvalidConfiguration("input and output sample rates are different").into(),
-        );
+        Err(ErrorKind::InvalidConfiguration(
+            "input and output sample rates are different",
+        ))?;
     } else if input_channels != 2 || output_channels != 2 {
-        return Err(ErrorKind::InvalidConfiguration("only stereo is supported").into());
+        Err(ErrorKind::InvalidConfiguration("only stereo is supported"))?;
     }
 
     instance.set_sample_rate(input_sample_rate);
@@ -299,37 +275,40 @@ fn backend(
     }
 
     // the input to processor receiver
-    let (input_sender, input_receiver) = bounded::<[f32; 2]>(BLOCK_SIZE);
+    let (input_sender, input_receiver) = bounded::<[f32; 2]>(BLOCK_SIZE * 4);
     // the processor to output sender
-    let (output_sender, output_receiver) = bounded::<[f32; 2]>(BLOCK_SIZE);
+    let (output_sender, output_receiver) = bounded::<[f32; 2]>(BLOCK_SIZE * 4);
+    // allows input_stream to stop the program on errors
+    let run_clone_a = Arc::clone(run);
+    // allows output_stream to stop the program on errors
+    let run_clone_b = Arc::clone(run);
 
     let input_stream = input_device.build_input_stream(
         &input_config.clone().into(),
         move |input: &[f32], _: &_| {
             for frame in input.chunks(2) {
-                _ = input_sender.send([frame[0], frame[1]]);
+                _ = input_sender.try_send([frame[0], frame[1]]);
             }
         },
-        |err| {
-            error!("an error occurred on the input stream: {}", err);
+        move |error| {
+            error!("an error occurred on the input stream: {error}");
+            run_clone_a.store(false, Relaxed);
         },
         None,
     )?;
-
-    let silence = [0_f32, 0_f32];
 
     let output_stream = output_device.build_output_stream(
         &output_config.clone().into(),
         move |output: &mut [f32], _: &_| {
             for frame in output.chunks_mut(2) {
-                let sample = output_receiver.recv().unwrap_or(silence);
-
-                frame[0] = sample[0];
-                frame[1] = sample[1];
+                let samples = output_receiver.recv().unwrap_or(SILENCE);
+                frame[0] = samples[0];
+                frame[1] = samples[1];
             }
         },
-        |err| {
-            error!("an error occurred on the output stream: {}", err);
+        move |error| {
+            error!("an error occurred on the output stream: {error}");
+            run_clone_b.store(false, Relaxed);
         },
         None,
     )?;
@@ -351,11 +330,10 @@ fn processor(
     // three inputs/outputs are needed for stereo processing
     let mut inputs = [[0_f32; BLOCK_SIZE]; 3];
     let mut outputs = [[0_f32; BLOCK_SIZE]; 3];
-    // the current position in the input buffers
-    let mut position = 0;
-
     // the host buffer
     let mut buffer = HostBuffer::new(3, 3);
+    // the current position in the input buffers
+    let mut position = 0;
 
     while run.load(Relaxed) {
         let frame = receiver.recv()?;
@@ -378,12 +356,13 @@ fn processor(
         // process the audio
         instance.process(&mut audio_buffer);
 
-        // reinterleave the processed buffers and send it to the output
+        // re-interleave the processed buffers and send it to the output
         for frame in outputs[0].into_iter().zip(outputs[1].into_iter()) {
-            sender.send([frame.0, frame.1])?;
+            sender.try_send([frame.0, frame.1])?;
         }
     }
 
+    // restore original state
     run.store(true, Relaxed);
     Ok(())
 }
@@ -409,11 +388,9 @@ fn menu_handler(
         Ok(1001) => {
             if manager_open.load(Relaxed) {
                 return Ok(());
-            }
-
-            {
-                let mut input_devices = INPUT_DEVICES.write().map_err(|_| ErrorKind::Poison)?;
-                let mut output_devices = OUTPUT_DEVICES.write().map_err(|_| ErrorKind::Poison)?;
+            } else {
+                let mut input_devices = INPUT_DEVICES.write().unwrap();
+                let mut output_devices = OUTPUT_DEVICES.write().unwrap();
 
                 input_devices.clear();
                 output_devices.clear();
@@ -435,7 +412,7 @@ fn menu_handler(
                 }
             }
 
-            let old_devices = CONFIG.devices()?;
+            let old_devices = CONFIG.devices();
 
             let window = win::window::build()
                 .set_message_callback(|window, message| {
@@ -457,7 +434,7 @@ fn menu_handler(
 
             manager_open.store(false, Relaxed);
 
-            if old_devices != CONFIG.devices()? {
+            if old_devices != CONFIG.devices() {
                 // restart the backend if the devices have changed
                 run_clone.store(false, Relaxed);
             }
@@ -478,8 +455,8 @@ fn menu_handler(
 /// window callback for the device manager
 fn device_manager_callback(window: &Window, message: Message) -> Result<Option<isize>> {
     match message {
-        Message::Create => unsafe {
-            let (input_device, output_device) = CONFIG.devices()?;
+        Message::Create => {
+            let (input_device, output_device) = CONFIG.devices();
 
             build_device_widget(
                 window,
@@ -498,7 +475,7 @@ fn device_manager_callback(window: &Window, message: Message) -> Result<Option<i
                 160,
                 IDC_OUTPUT_SELECT,
             )?;
-        },
+        }
         Message::Size(info) => {
             let input_ctrl = window.get_dialog_item(IDC_INPUT_SELECT)?;
             let output_ctrl = window.get_dialog_item(IDC_OUTPUT_SELECT)?;
@@ -554,7 +531,7 @@ fn editor_callback(window: &Window, message: Message) -> Option<isize> {
     match message {
         Message::Close => {
             // hide the window instead of destroying it
-            unsafe { ShowWindow(window.hwnd_ptr(), SW_HIDE) };
+            _ = unsafe { ShowWindow(window.hwnd_ptr(), SW_HIDE) };
             Some(0)
         }
         _ => None,
@@ -562,7 +539,7 @@ fn editor_callback(window: &Window, message: Message) -> Option<isize> {
 }
 
 /// builds a list box widget for the device manager
-unsafe fn build_device_widget(
+fn build_device_widget(
     window: &Window,
     devices: &RwLock<Vec<String>>,
     name: &str,
@@ -582,12 +559,7 @@ unsafe fn build_device_widget(
 
     let mut selected_output = None;
 
-    for (index, device) in devices
-        .read()
-        .map_err(|_| ErrorKind::Poison)?
-        .iter()
-        .enumerate()
-    {
+    for (index, device) in devices.read().unwrap().iter().enumerate() {
         if device == selected {
             selected_output = Some(index);
         }
@@ -598,7 +570,9 @@ unsafe fn build_device_widget(
 
     if let Some(index) = selected_output {
         let hwnd = ctrl.hwnd_ptr();
-        SendMessageA(hwnd, LB_SETCURSEL, index, 0);
+        unsafe {
+            SendMessageA(hwnd, LB_SETCURSEL, index, 0);
+        }
     }
 
     Ok(())

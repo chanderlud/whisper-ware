@@ -1,12 +1,11 @@
+use cpal::{BuildStreamError, DefaultStreamConfigError, DevicesError, PlayStreamError};
+use kanal::{ReceiveError, SendError};
 use std::fmt::{Display, Formatter};
 use std::io;
 
-use cpal::{BuildStreamError, DefaultStreamConfigError, DevicesError, PlayStreamError};
-use kanal::{ReceiveError, SendError};
-
 #[derive(Debug)]
 pub(crate) struct Error {
-    kind: ErrorKind,
+    pub(crate) kind: ErrorKind,
 }
 
 #[derive(Debug)]
@@ -21,17 +20,12 @@ pub(crate) enum ErrorKind {
     BadIcon(tray_icon::BadIcon),
     Menu(tray_icon::menu::Error),
     TrayIcon(tray_icon::Error),
-    WindowsGui(minimal_windows_gui::Error),
-    Ratelimiter(ratelimit::Error),
-    ConfigRead(io::Error),
-    ConfigWrite(io::Error),
     Json(serde_json::Error),
+    Io(io::Error),
     NoOutputDevice,
     InvalidConfiguration(&'static str),
     NoInputDevice,
     EditorMissing,
-    Poison,
-    ConfigDir,
 }
 
 impl From<SendError> for Error {
@@ -114,26 +108,18 @@ impl From<tray_icon::Error> for Error {
     }
 }
 
-impl From<minimal_windows_gui::Error> for Error {
-    fn from(err: minimal_windows_gui::Error) -> Self {
-        Error {
-            kind: ErrorKind::WindowsGui(err),
-        }
-    }
-}
-
-impl From<ratelimit::Error> for Error {
-    fn from(err: ratelimit::Error) -> Self {
-        Error {
-            kind: ErrorKind::Ratelimiter(err),
-        }
-    }
-}
-
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
         Error {
             kind: ErrorKind::Json(err),
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        Error {
+            kind: ErrorKind::Io(error),
         }
     }
 }
@@ -161,18 +147,13 @@ impl Display for Error {
                 ErrorKind::BadIcon(error) => format!("bad icon: {:?}", error),
                 ErrorKind::Menu(error) => format!("menu error: {:?}", error),
                 ErrorKind::TrayIcon(error) => format!("tray icon error: {:?}", error),
-                ErrorKind::WindowsGui(error) => format!("windows gui error: {:?}", error),
-                ErrorKind::Ratelimiter(error) => format!("ratelimiter error: {:?}", error),
-                ErrorKind::ConfigRead(error) => format!("config read error: {}", error),
-                ErrorKind::ConfigWrite(error) => format!("config write error: {}", error),
+                ErrorKind::Io(error) => format!("io error: {}", error),
                 ErrorKind::Json(error) => format!("json error: {}", error),
                 ErrorKind::NoOutputDevice => "output device not found".to_string(),
                 ErrorKind::InvalidConfiguration(message) =>
                     format!("invalid configuration: {}", message),
                 ErrorKind::NoInputDevice => "input device not found".to_string(),
                 ErrorKind::EditorMissing => "editor missing".to_string(),
-                ErrorKind::Poison => "failed to lock resource (poison)".to_string(),
-                ErrorKind::ConfigDir => "failed to locate config directory".to_string(),
             }
         )
     }
