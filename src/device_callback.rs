@@ -3,7 +3,6 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
     sync::mpsc::{Sender, channel},
 };
-
 use winapi::shared::ntdef::LPCWSTR;
 use winapi::um::combaseapi::{CLSCTX_ALL, CoInitializeEx, CoUninitialize};
 use winapi::{
@@ -30,124 +29,7 @@ winapi::DEFINE_GUID! {IID_IMMNOTIFICATION_CLIENT, 0x7991eec9, 0x7e89, 0x4d85, 0x
 
 winapi::DEFINE_GUID! { IID_IMMDEVICE_ENUMERATOR, 0xA95664D2, 0x9614, 0x4F35, 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6 }
 
-// Helper: simple HRESULT check
-fn hresult_failed(hr: i32) -> bool {
-    hr < 0
-}
-
-#[repr(C)]
-struct AudioDeviceCallback {
-    lp_vtbl: *const IMMNotificationClientVtbl,
-    ref_count: AtomicU32,
-    tx: Sender<()>,
-}
-
-// Cast from interface pointer to our struct
-fn from_this<'a>(this: *mut IMMNotificationClient) -> &'a mut AudioDeviceCallback {
-    unsafe { &mut *(this as *mut AudioDeviceCallback) }
-}
-
-// IUnknown::QueryInterface
-unsafe extern "system" fn adc_query_interface(
-    this: *mut IUnknown,
-    riid: REFIID,
-    ppv: *mut *mut winapi::ctypes::c_void,
-) -> i32 {
-    if ppv.is_null() {
-        return E_NOINTERFACE;
-    }
-
-    unsafe {
-        *ppv = ptr::null_mut();
-    }
-
-    if riid == &IID_IUNKNOWN || riid == &IID_IMMNOTIFICATION_CLIENT {
-        let adc = this as *mut winapi::ctypes::c_void;
-        unsafe {
-            *ppv = adc;
-            adc_add_ref(this);
-        }
-        return S_OK;
-    }
-
-    E_NOINTERFACE
-}
-
-// IUnknown::AddRef
-unsafe extern "system" fn adc_add_ref(this: *mut IUnknown) -> ULONG {
-    let adc = from_this(this.cast());
-    adc.ref_count.fetch_add(1, Ordering::SeqCst) + 1
-}
-
-// IUnknown::Release
-unsafe extern "system" fn adc_release(this: *mut IUnknown) -> ULONG {
-    let adc = from_this(this.cast());
-    let old = adc.ref_count.fetch_sub(1, Ordering::SeqCst);
-    if old == 1 {
-        // ref count is going to 0, free the object
-        unsafe {
-            drop(Box::from_raw(this as *mut AudioDeviceCallback));
-        }
-        0
-    } else {
-        old - 1
-    }
-}
-
-// IMMNotificationClient::OnDeviceStateChanged
-unsafe extern "system" fn adc_on_device_state_changed(
-    this: *mut IMMNotificationClient,
-    _id: LPCWSTR,
-    _new_state: DWORD,
-) -> i32 {
-    let adc = from_this(this);
-    let _ = adc.tx.send(());
-    S_OK
-}
-
-// IMMNotificationClient::OnDeviceAdded
-unsafe extern "system" fn adc_on_device_added(
-    this: *mut IMMNotificationClient,
-    _id: LPCWSTR,
-) -> i32 {
-    let adc = from_this(this);
-    let _ = adc.tx.send(());
-    S_OK
-}
-
-// IMMNotificationClient::OnDeviceRemoved
-unsafe extern "system" fn adc_on_device_removed(
-    this: *mut IMMNotificationClient,
-    _id: LPCWSTR,
-) -> i32 {
-    let adc = from_this(this);
-    let _ = adc.tx.send(());
-    S_OK
-}
-
-// IMMNotificationClient::OnDefaultDeviceChanged
-unsafe extern "system" fn adc_on_default_device_changed(
-    this: *mut IMMNotificationClient,
-    _flow: EDataFlow,
-    _role: ERole,
-    _id: LPCWSTR,
-) -> i32 {
-    let adc = from_this(this);
-    let _ = adc.tx.send(());
-    S_OK
-}
-
-// IMMNotificationClient::OnPropertyValueChanged
-unsafe extern "system" fn adc_on_property_value_changed(
-    _this: *mut IMMNotificationClient,
-    _id: LPCWSTR,
-    _key: PROPERTYKEY,
-) -> i32 {
-    // ignore property changes or send if you care
-    S_OK
-}
-
-// Static vtable for our COM object
+/// Static vtable for our COM object
 static AUDIO_DEVICE_CALLBACK_VTBL: IMMNotificationClientVtbl = IMMNotificationClientVtbl {
     parent: IUnknownVtbl {
         QueryInterface: adc_query_interface,
@@ -161,14 +43,11 @@ static AUDIO_DEVICE_CALLBACK_VTBL: IMMNotificationClientVtbl = IMMNotificationCl
     OnPropertyValueChanged: adc_on_property_value_changed,
 };
 
-unsafe fn create_audio_device_callback(tx: Sender<()>) -> *mut IMMNotificationClient {
-    let obj = Box::new(AudioDeviceCallback {
-        lp_vtbl: &AUDIO_DEVICE_CALLBACK_VTBL,
-        ref_count: AtomicU32::new(1), // our own ref
-        tx,
-    });
-
-    Box::into_raw(obj) as *mut IMMNotificationClient
+#[repr(C)]
+struct AudioDeviceCallback {
+    vtable: *const IMMNotificationClientVtbl,
+    ref_count: AtomicU32,
+    tx: Sender<()>,
 }
 
 /// Blocks the current thread until *any* audio device change notification happens.
@@ -234,4 +113,124 @@ pub(crate) fn wait_for_audio_device_change() {
         (*enumerator).Release();
         CoUninitialize();
     }
+}
+
+unsafe fn create_audio_device_callback(tx: Sender<()>) -> *mut IMMNotificationClient {
+    let obj = Box::new(AudioDeviceCallback {
+        vtable: &AUDIO_DEVICE_CALLBACK_VTBL,
+        ref_count: AtomicU32::new(1), // our own ref
+        tx,
+    });
+
+    Box::into_raw(obj) as *mut IMMNotificationClient
+}
+
+/// Helper: simple HRESULT check
+fn hresult_failed(hr: i32) -> bool {
+    hr < 0
+}
+
+/// Cast from interface pointer to our struct
+fn from_this<'a>(this: *mut IMMNotificationClient) -> &'a mut AudioDeviceCallback {
+    unsafe { &mut *(this as *mut AudioDeviceCallback) }
+}
+
+/// IUnknown::QueryInterface
+unsafe extern "system" fn adc_query_interface(
+    this: *mut IUnknown,
+    riid: REFIID,
+    ppv: *mut *mut winapi::ctypes::c_void,
+) -> i32 {
+    if ppv.is_null() {
+        return E_NOINTERFACE;
+    }
+
+    unsafe {
+        *ppv = ptr::null_mut();
+    }
+
+    if riid == &IID_IUNKNOWN || riid == &IID_IMMNOTIFICATION_CLIENT {
+        let adc = this as *mut winapi::ctypes::c_void;
+        unsafe {
+            *ppv = adc;
+            adc_add_ref(this);
+        }
+        return S_OK;
+    }
+
+    E_NOINTERFACE
+}
+
+/// IUnknown::AddRef
+unsafe extern "system" fn adc_add_ref(this: *mut IUnknown) -> ULONG {
+    let adc = from_this(this.cast());
+    adc.ref_count.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// IUnknown::Release
+unsafe extern "system" fn adc_release(this: *mut IUnknown) -> ULONG {
+    let adc = from_this(this.cast());
+    let old = adc.ref_count.fetch_sub(1, Ordering::SeqCst);
+    if old == 1 {
+        // ref count is going to 0, free the object
+        unsafe {
+            drop(Box::from_raw(this as *mut AudioDeviceCallback));
+        }
+        0
+    } else {
+        old - 1
+    }
+}
+
+/// IMMNotificationClient::OnDeviceStateChanged
+unsafe extern "system" fn adc_on_device_state_changed(
+    this: *mut IMMNotificationClient,
+    _id: LPCWSTR,
+    _new_state: DWORD,
+) -> i32 {
+    let adc = from_this(this);
+    let _ = adc.tx.send(());
+    S_OK
+}
+
+/// IMMNotificationClient::OnDeviceAdded
+unsafe extern "system" fn adc_on_device_added(
+    this: *mut IMMNotificationClient,
+    _id: LPCWSTR,
+) -> i32 {
+    let adc = from_this(this);
+    let _ = adc.tx.send(());
+    S_OK
+}
+
+/// IMMNotificationClient::OnDeviceRemoved
+unsafe extern "system" fn adc_on_device_removed(
+    this: *mut IMMNotificationClient,
+    _id: LPCWSTR,
+) -> i32 {
+    let adc = from_this(this);
+    let _ = adc.tx.send(());
+    S_OK
+}
+
+/// IMMNotificationClient::OnDefaultDeviceChanged
+unsafe extern "system" fn adc_on_default_device_changed(
+    this: *mut IMMNotificationClient,
+    _flow: EDataFlow,
+    _role: ERole,
+    _id: LPCWSTR,
+) -> i32 {
+    let adc = from_this(this);
+    let _ = adc.tx.send(());
+    S_OK
+}
+
+/// IMMNotificationClient::OnPropertyValueChanged
+unsafe extern "system" fn adc_on_property_value_changed(
+    _this: *mut IMMNotificationClient,
+    _id: LPCWSTR,
+    _key: PROPERTYKEY,
+) -> i32 {
+    // ignore property changes
+    S_OK
 }
