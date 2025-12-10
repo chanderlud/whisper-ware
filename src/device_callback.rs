@@ -3,6 +3,7 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
     sync::mpsc::{Sender, channel},
 };
+use log::warn;
 use winapi::shared::ntdef::LPCWSTR;
 use winapi::um::combaseapi::{CLSCTX_ALL, CoInitializeEx, CoUninitialize};
 use winapi::{
@@ -53,13 +54,13 @@ struct AudioDeviceCallback {
 /// Blocks the current thread until *any* audio device change notification happens.
 pub(crate) fn wait_for_audio_device_change() {
     unsafe {
-        // Initialize COM apartment
+        // initialize COM apartment
         let hr = CoInitializeEx(ptr::null_mut(), COINIT_APARTMENTTHREADED);
         if hresult_failed(hr) {
             panic!("CoInitializeEx failed: 0x{:08x}", hr);
         }
 
-        // Create IMMDeviceEnumerator
+        // create IMMDeviceEnumerator
         let mut enumerator_ptr: *mut IMMDeviceEnumerator = ptr::null_mut();
         let hr = CoCreateInstance(
             &CLSID_MMDeviceEnumerator,
@@ -77,39 +78,33 @@ pub(crate) fn wait_for_audio_device_change() {
         }
 
         let enumerator = &mut *enumerator_ptr;
-
-        // Create channel for notifications
+        // create channel for notifications
         let (tx, rx) = channel::<()>();
-
-        // Create our callback COM object
+        // create our callback COM object
         let callback_ptr = create_audio_device_callback(tx);
 
-        // Register callback
+        // register callback
         let hr = (*enumerator).RegisterEndpointNotificationCallback(callback_ptr);
         if hresult_failed(hr) {
-            // Drop our own ref
             adc_release(callback_ptr.cast());
             (*enumerator).Release();
             CoUninitialize();
             panic!("RegisterEndpointNotificationCallback failed: 0x{:08x}", hr);
         }
 
-        // This is your "pause my app's thread until devices change"
+        // block until devices change
         let _ = rx.recv();
 
-        // Unregister callback
+        // unregister callback
         let hr = (*enumerator).UnregisterEndpointNotificationCallback(callback_ptr);
         if hresult_failed(hr) {
-            eprintln!(
+            warn!(
                 "UnregisterEndpointNotificationCallback failed: 0x{:08x}",
                 hr
             );
         }
 
-        // Release our own reference to the callback (COM has released its own)
         adc_release(callback_ptr.cast());
-
-        // Release enumerator & COM
         (*enumerator).Release();
         CoUninitialize();
     }
