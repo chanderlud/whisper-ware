@@ -210,7 +210,7 @@ fn app() -> Result<()> {
                             error!("backend error: {error:?}");
                         }
                         last_error = Some(error);
-                    },
+                    }
                 },
             }
 
