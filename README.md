@@ -11,3 +11,5 @@ I developed this software to enhance quiet sounds in competitive games while mai
 - Checking the logs via the tray application can help diagnose issues
 - Try restarting the backend from the tray application
 - Try a different audio source application (i.e. Spotify) to see if the issue is with the game
+## Architecture
+![a diagram describing whisperware's internal design](assets/whisperware-design.svg)
