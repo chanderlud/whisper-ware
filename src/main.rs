@@ -2,18 +2,18 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, default_host};
-use kanal::{Receiver, Sender, bounded, unbounded};
 use lazy_static::lazy_static;
 use log::{LevelFilter, debug, error, info, warn};
 use minimal_windows_gui as win;
 use minimal_windows_gui::class::Class;
 use minimal_windows_gui::message::Message;
 use minimal_windows_gui::window::Window;
+use rtrb::{Consumer, Producer, RingBuffer};
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{sleep, spawn};
 use std::time::Duration;
 use tray_icon::menu::{MenuEvent, MenuItem};
@@ -51,14 +51,13 @@ const CLASS_NAME: &str = "whisperWare";
 /// the control ids for the device manager
 const IDC_INPUT_SELECT: u16 = 101;
 const IDC_OUTPUT_SELECT: u16 = 102;
-const SILENCE: [f32; 2] = [0_f32, 0_f32];
 
 // shared values accessed in callbacks
 lazy_static! {
     static ref INPUT_DEVICES: RwLock<Vec<String>> = Default::default();
     static ref OUTPUT_DEVICES: RwLock<Vec<String>> = Default::default();
     static ref CONFIG: Arc<AtomicConfig> = {
-        let (sender, receiver) = unbounded();
+        let (sender, receiver) = std::sync::mpsc::channel();
         let config = Arc::new(AtomicConfig::new(sender));
         let config_clone = Arc::clone(&config);
         spawn(move || config_saver(config_clone, receiver));
@@ -260,8 +259,8 @@ fn backend(
 
     let input_config = input_device.default_input_config()?;
     let output_config = output_device.default_output_config()?;
-    let input_sample_rate = input_config.sample_rate().0 as f32;
-    let output_sample_rate = output_config.sample_rate().0 as f32;
+    let input_sample_rate = input_config.sample_rate() as f32;
+    let output_sample_rate = output_config.sample_rate() as f32;
     let input_channels = input_config.channels() as usize;
     let output_channels = output_config.channels() as usize;
 
@@ -281,10 +280,12 @@ fn backend(
         *initialize = false;
     }
 
-    // the input to processor receiver
-    let (input_sender, input_receiver) = bounded::<[f32; 2]>(BLOCK_SIZE * 4);
-    // the processor to output sender
-    let (output_sender, output_receiver) = bounded::<[f32; 2]>(BLOCK_SIZE * 4);
+    let (mut input_producer, input_consumer) = RingBuffer::<[f32; 2]>::new(BLOCK_SIZE * 4);
+    let input_notify = Arc::new(Condvar::new());
+    let input_notify_clone = Arc::clone(&input_notify);
+
+    let (output_producer, mut output_consumer) = RingBuffer::<[f32; 2]>::new(BLOCK_SIZE * 4);
+
     // allows input_stream to stop the program on errors
     let run_clone_a = Arc::clone(run);
     // allows output_stream to stop the program on errors
@@ -293,9 +294,12 @@ fn backend(
     let input_stream = input_device.build_input_stream(
         &input_config.clone().into(),
         move |input: &[f32], _: &_| {
-            for frame in input.chunks(2) {
-                _ = input_sender.try_send([frame[0], frame[1]]);
-            }
+            let Ok(chunk) = input_producer.write_chunk_uninit(input.len() / input_channels) else {
+                return;
+            };
+
+            chunk.fill_from_iter(input.chunks(2).map(|frame| [frame[0], frame[1]]));
+            input_notify.notify_one();
         },
         move |error| {
             error!("an error occurred on the input stream: {error}");
@@ -307,10 +311,20 @@ fn backend(
     let output_stream = output_device.build_output_stream(
         &output_config.clone().into(),
         move |output: &mut [f32], _: &_| {
-            for frame in output.chunks_mut(2) {
-                let samples = output_receiver.recv().unwrap_or(SILENCE);
-                frame[0] = samples[0];
-                frame[1] = samples[1];
+            let num_frames = output.len() / output_channels;
+            match output_consumer.read_chunk(num_frames) {
+                Ok(chunk) => {
+                    for (samples, frame) in
+                        chunk.into_iter().zip(output.chunks_mut(output_channels))
+                    {
+                        frame[0] = samples[0];
+                        frame[1] = samples[1];
+                    }
+                }
+                Err(_) => {
+                    // Not enough samples available; fill with silence
+                    output.fill(0_f32);
+                }
             }
         },
         move |error| {
@@ -323,13 +337,20 @@ fn backend(
     input_stream.play()?;
     output_stream.play()?;
 
-    processor(input_receiver, output_sender, instance, run)
+    processor(
+        input_consumer,
+        output_producer,
+        input_notify_clone,
+        instance,
+        run,
+    )
 }
 
 /// the audio processing thread
 fn processor(
-    receiver: Receiver<[f32; 2]>,
-    sender: Sender<[f32; 2]>,
+    mut consumer: Consumer<[f32; 2]>,
+    mut producer: Producer<[f32; 2]>,
+    notify: Arc<Condvar>,
     instance: &mut PluginInstance,
     run: &Arc<AtomicBool>,
 ) -> Result<()> {
@@ -339,23 +360,28 @@ fn processor(
     let mut outputs = [[0_f32; BLOCK_SIZE]; 3];
     // the host buffer
     let mut buffer = HostBuffer::new(3, 3);
-    // the current position in the input buffers
-    let mut position = 0;
+    // dummy mutex
+    let mutex = Mutex::new(());
 
     while run.load(Relaxed) {
-        let frame = receiver.recv()?;
-
-        // deinterleave the input
-        inputs[0][position] = frame[0];
-        inputs[1][position] = frame[1];
-        position += 1; // advance the position in the buffer
-
-        if position < BLOCK_SIZE {
-            // if the buffer is not full, continue
+        // block until enough slots are available
+        loop {
+            let available = consumer.slots();
+            if available >= BLOCK_SIZE {
+                break; // there are enough slots available
+            } else if consumer.is_abandoned() {
+                return Ok(()); // EOF
+            }
+            let guard = mutex.lock().unwrap();
+            drop(notify.wait(guard).unwrap());
             continue;
-        } else {
-            // reset the position
-            position = 0;
+        }
+        // read at most the number of samples that will fit in dst
+        let chunk = consumer.read_chunk(BLOCK_SIZE)?;
+        // copy samples into inputs, consuming chunk
+        for (i, frame) in chunk.into_iter().enumerate() {
+            inputs[0][i] = frame[0];
+            inputs[1][i] = frame[1];
         }
 
         // bind the buffer to the inputs and outputs
@@ -363,9 +389,17 @@ fn processor(
         // process the audio
         instance.process(&mut audio_buffer);
 
+        let available = producer.slots();
+        let to_write = BLOCK_SIZE.min(available);
+
         // re-interleave the processed buffers and send it to the output
-        for frame in outputs[0].into_iter().zip(outputs[1].into_iter()) {
-            sender.try_send([frame.0, frame.1])?;
+        if let Ok(chunk) = producer.write_chunk_uninit(to_write) {
+            chunk.fill_from_iter(
+                outputs[0]
+                    .into_iter()
+                    .zip(outputs[1].into_iter())
+                    .map(|(a, b)| [a, b]),
+            );
         }
     }
 

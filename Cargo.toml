@@ -1,13 +1,12 @@
 [package]
 name = "whisper_ware"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-cpal = "0.16"
-kanal = "0.1"
+cpal = "0.17"
 vst = "=0.3.0"
 winapi = { version = "0.3", features = ["minwindef", "windef", "winbase", "winerror", "objbase", "propsys", "combaseapi", "mmdeviceapi", "ntdef", "unknwnbase", "wtypes"] }
 tray-icon = "0.21"
@@ -20,6 +19,7 @@ atomic_float = "1"
 minimal-windows-gui = { git = "https://github.com/Lonami/rust-windows-gui" }
 lazy_static = "1"
 log-panics = "2"
+rtrb = "0.3"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

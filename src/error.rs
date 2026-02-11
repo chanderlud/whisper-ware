@@ -1,5 +1,5 @@
 use cpal::{BuildStreamError, DefaultStreamConfigError, DevicesError, PlayStreamError};
-use kanal::{ReceiveError, SendError};
+use rtrb::chunks::ChunkError;
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::mem::discriminant;
@@ -11,8 +11,6 @@ pub(crate) struct Error {
 
 #[derive(Debug)]
 pub(crate) enum ErrorKind {
-    Send(SendError),
-    Receive(ReceiveError),
     Devices(DevicesError),
     BuildStream(BuildStreamError),
     PlayStream(PlayStreamError),
@@ -22,6 +20,7 @@ pub(crate) enum ErrorKind {
     Menu(tray_icon::menu::Error),
     TrayIcon(tray_icon::Error),
     Json(serde_json::Error),
+    Chunk(ChunkError),
     Io(io::Error),
     NoOutputDevice,
     InvalidConfiguration(&'static str),
@@ -36,22 +35,6 @@ impl PartialEq for ErrorKind {
 }
 
 impl Eq for ErrorKind {}
-
-impl From<SendError> for Error {
-    fn from(err: SendError) -> Self {
-        Error {
-            kind: ErrorKind::Send(err),
-        }
-    }
-}
-
-impl From<ReceiveError> for Error {
-    fn from(err: ReceiveError) -> Self {
-        Error {
-            kind: ErrorKind::Receive(err),
-        }
-    }
-}
 
 impl From<DevicesError> for Error {
     fn from(err: DevicesError) -> Self {
@@ -133,6 +116,14 @@ impl From<io::Error> for Error {
     }
 }
 
+impl From<ChunkError> for Error {
+    fn from(error: ChunkError) -> Self {
+        Error {
+            kind: ErrorKind::Chunk(error),
+        }
+    }
+}
+
 impl From<ErrorKind> for Error {
     fn from(kind: ErrorKind) -> Self {
         Error { kind }
@@ -145,8 +136,6 @@ impl Display for Error {
             f,
             "{}",
             match &self.kind {
-                ErrorKind::Send(error) => format!("send error: {}", error),
-                ErrorKind::Receive(error) => format!("receive error: {}", error),
                 ErrorKind::Devices(error) => format!("devices error: {}", error),
                 ErrorKind::BuildStream(error) => format!("build stream error: {}", error),
                 ErrorKind::PlayStream(error) => format!("play stream error: {}", error),
@@ -158,6 +147,7 @@ impl Display for Error {
                 ErrorKind::TrayIcon(error) => format!("tray icon error: {:?}", error),
                 ErrorKind::Io(error) => format!("io error: {}", error),
                 ErrorKind::Json(error) => format!("json error: {}", error),
+                ErrorKind::Chunk(error) => format!("chunk error: {}", error),
                 ErrorKind::NoOutputDevice => "output device not found".to_string(),
                 ErrorKind::InvalidConfiguration(message) =>
                     format!("invalid configuration: {}", message),

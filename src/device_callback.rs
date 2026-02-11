@@ -1,9 +1,9 @@
+use log::warn;
 use std::{
     ptr,
     sync::atomic::{AtomicU32, Ordering},
     sync::mpsc::{Sender, channel},
 };
-use log::warn;
 use winapi::shared::ntdef::LPCWSTR;
 use winapi::um::combaseapi::{CLSCTX_ALL, CoInitializeEx, CoUninitialize};
 use winapi::{

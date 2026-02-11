@@ -1,6 +1,5 @@
 use crate::Result;
 use atomic_float::AtomicF32;
-use kanal::{Receiver, Sender};
 use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_writer_pretty};
@@ -10,6 +9,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use vst::host::PluginInstance;
