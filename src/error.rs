@@ -1,4 +1,4 @@
-use cpal::{BuildStreamError, DefaultStreamConfigError, DevicesError, PlayStreamError};
+use cpal::{BuildStreamError, DefaultStreamConfigError, DeviceIdError, DevicesError, PlayStreamError};
 use rtrb::chunks::ChunkError;
 use std::fmt::{Display, Formatter};
 use std::io;
@@ -12,6 +12,7 @@ pub(crate) struct Error {
 #[derive(Debug)]
 pub(crate) enum ErrorKind {
     Devices(DevicesError),
+    DeviceId(DeviceIdError),
     BuildStream(BuildStreamError),
     PlayStream(PlayStreamError),
     DefaultStreamConfig(DefaultStreamConfigError),
@@ -40,6 +41,14 @@ impl From<DevicesError> for Error {
     fn from(err: DevicesError) -> Self {
         Error {
             kind: ErrorKind::Devices(err),
+        }
+    }
+}
+
+impl From<DeviceIdError> for Error {
+    fn from(err: DeviceIdError) -> Self {
+        Error {
+            kind: ErrorKind::DeviceId(err),
         }
     }
 }
@@ -137,6 +146,7 @@ impl Display for Error {
             "{}",
             match &self.kind {
                 ErrorKind::Devices(error) => format!("devices error: {}", error),
+                ErrorKind::DeviceId(error) => format!("device id error: {}", error),
                 ErrorKind::BuildStream(error) => format!("build stream error: {}", error),
                 ErrorKind::PlayStream(error) => format!("play stream error: {}", error),
                 ErrorKind::DefaultStreamConfig(error) =>

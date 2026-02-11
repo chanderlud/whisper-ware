@@ -28,8 +28,8 @@ struct Config {
     output_level: f32,
     sidechain: f32,
     full_bandwidth: f32,
-    input_device: String,
-    output_device: String,
+    input_device: Option<String>,
+    output_device: Option<String>,
 }
 
 impl Default for Config {
@@ -46,8 +46,8 @@ impl Default for Config {
             output_level: 1_f32,
             sidechain: 0_f32,
             full_bandwidth: 1_f32,
-            input_device: String::from("Default"),
-            output_device: String::from("Default"),
+            input_device: None,
+            output_device: None,
         }
     }
 }
@@ -68,6 +68,7 @@ impl Config {
             full_bandwidth: AtomicF32::new(self.full_bandwidth),
             input_device: Mutex::new(self.input_device.clone()),
             output_device: Mutex::new(self.output_device.clone()),
+
             path,
             dirty: Default::default(),
             notify,
@@ -87,8 +88,8 @@ pub(crate) struct AtomicConfig {
     output_level: AtomicF32,
     sidechain: AtomicF32,
     full_bandwidth: AtomicF32,
-    input_device: Mutex<String>,
-    output_device: Mutex<String>,
+    input_device: Mutex<Option<String>>,
+    output_device: Mutex<Option<String>>,
     path: PathBuf,
     dirty: AtomicBool,
     notify: Sender<()>,
@@ -122,23 +123,23 @@ impl AtomicConfig {
             .atomic(config_path, notify)
     }
 
-    /// Returns the input and output devices
-    pub(crate) fn devices(&self) -> (String, String) {
+    /// Returns the input and output device IDs
+    pub(crate) fn devices(&self) -> (Option<String>, Option<String>) {
         let input_device = self.input_device.lock().unwrap().clone();
         let output_device = self.output_device.lock().unwrap().clone();
         (input_device, output_device)
     }
 
-    /// Sets the input device
-    pub(crate) fn set_input_device(&self, device: String) -> Result<()> {
+    /// Sets the input device ID
+    pub(crate) fn set_input_device(&self, device: Option<String>) -> Result<()> {
         let mut input_device = self.input_device.lock().unwrap();
         *input_device = device;
         self.mark_dirty();
         Ok(())
     }
 
-    /// Sets the output device
-    pub(crate) fn set_output_device(&self, device: String) -> Result<()> {
+    /// Sets the output device ID
+    pub(crate) fn set_output_device(&self, device: Option<String>) -> Result<()> {
         let mut output_device = self.output_device.lock().unwrap();
         *output_device = device;
         self.mark_dirty();
@@ -184,6 +185,7 @@ impl AtomicConfig {
             output_device: self.output_device.lock().unwrap().clone(),
         }
     }
+
 
     /// Notifies writer that the config has changed
     fn mark_dirty(&self) {

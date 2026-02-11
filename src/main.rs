@@ -20,14 +20,12 @@ use tray_icon::menu::{MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder, menu::Menu};
 use vst::host::{Host, HostBuffer, PluginInstance, PluginLoader};
 use vst::prelude::Plugin;
-use winapi::shared::minwindef::LPARAM;
 use winapi::shared::windef::HWND;
 use winapi::um::processthreadsapi::GetCurrentProcess;
 use winapi::um::processthreadsapi::SetPriorityClass;
 use winapi::um::winbase::HIGH_PRIORITY_CLASS;
 use winapi::um::winuser::{
-    LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_SETCURSEL, SW_HIDE, SW_SHOW, SendMessageA,
-    ShowWindow, UpdateWindow,
+    LB_GETCURSEL, LB_SETCURSEL, SW_HIDE, SW_SHOW, SendMessageA, ShowWindow, UpdateWindow,
 };
 
 use crate::config::{AtomicConfig, config_saver};
@@ -54,8 +52,8 @@ const IDC_OUTPUT_SELECT: u16 = 102;
 
 // shared values accessed in callbacks
 lazy_static! {
-    static ref INPUT_DEVICES: RwLock<Vec<String>> = Default::default();
-    static ref OUTPUT_DEVICES: RwLock<Vec<String>> = Default::default();
+    static ref INPUT_DEVICES: RwLock<Vec<(String, Option<String>)>> = Default::default();
+    static ref OUTPUT_DEVICES: RwLock<Vec<(String, Option<String>)>> = Default::default();
     static ref CONFIG: Arc<AtomicConfig> = {
         let (sender, receiver) = std::sync::mpsc::channel();
         let config = Arc::new(AtomicConfig::new(sender));
@@ -232,30 +230,28 @@ fn backend(
     run: &Arc<AtomicBool>,
     initialize: &mut bool,
 ) -> Result<()> {
-    let (input_device_name, output_device_name) = CONFIG.devices();
-    let mut input_devices = host.input_devices()?;
-    let mut output_devices = host.output_devices()?;
+    let (input_device_id, output_device_id) = CONFIG.devices();
 
-    let input_device = if input_device_name == "Default" {
-        host.default_input_device()
-            .ok_or(ErrorKind::NoInputDevice)?
-    } else {
-        input_devices
-            .find(|device| device_by_name(device, &input_device_name))
-            .ok_or(ErrorKind::NoInputDevice)?
-    };
+    let input_device = device_by_id(host, &input_device_id, cpal::Host::default_input_device)
+        .ok_or(ErrorKind::NoInputDevice)?;
 
-    let output_device = if output_device_name == "Default" {
-        host.default_output_device()
-            .ok_or(ErrorKind::NoOutputDevice)?
-    } else {
-        output_devices
-            .find(|device| device_by_name(device, &output_device_name))
-            .ok_or(ErrorKind::NoOutputDevice)?
-    };
+    let output_device = device_by_id(host, &output_device_id, cpal::Host::default_output_device)
+        .ok_or(ErrorKind::NoOutputDevice)?;
 
-    info!("output device: {:?}", output_device.name());
-    info!("input device: {:?}", input_device.name());
+    info!(
+        "output device: {}",
+        output_device
+            .description()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|_| "unknown".to_string())
+    );
+    info!(
+        "input device: {}",
+        input_device
+            .description()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|_| "unknown".to_string())
+    );
 
     let input_config = input_device.default_input_config()?;
     let output_config = output_device.default_output_config()?;
@@ -436,18 +432,22 @@ fn menu_handler(
                 input_devices.clear();
                 output_devices.clear();
 
+                // add "Default" entry with None as device ID
+                input_devices.push(("Default".to_string(), None));
+                output_devices.push(("Default".to_string(), None));
+
                 if let Ok(devices) = host_clone.input_devices() {
                     for device in devices {
-                        if let Ok(name) = device.name() {
-                            input_devices.push(name);
+                        if let (Ok(desc), Ok(id)) = (device.description(), device.id()) {
+                            input_devices.push((desc.name().to_string(), Some(id.to_string())));
                         }
                     }
                 }
 
                 if let Ok(devices) = host_clone.output_devices() {
                     for device in devices {
-                        if let Ok(name) = device.name() {
-                            output_devices.push(name);
+                        if let (Ok(desc), Ok(id)) = (device.description(), device.id()) {
+                            output_devices.push((desc.name().to_string(), Some(id.to_string())));
                         }
                     }
                 }
@@ -532,7 +532,6 @@ fn device_manager_callback(window: &Window, message: Message) -> Result<Option<i
         }
         Message::Command(info) => unsafe {
             if let Some(control_data) = info.control_data() {
-                let mut buffer = [0_u8; 256];
                 let hwnd = control_data.window.hwnd_ptr();
 
                 let cur_sel = SendMessageA(hwnd, LB_GETCURSEL, 0, 0);
@@ -542,20 +541,18 @@ fn device_manager_callback(window: &Window, message: Message) -> Result<Option<i
                     return Ok(None);
                 }
 
-                let len = SendMessageA(hwnd, LB_GETTEXTLEN, cur_sel as usize, 0);
-                SendMessageA(
-                    hwnd,
-                    LB_GETTEXT,
-                    cur_sel as usize,
-                    buffer.as_mut_ptr() as LPARAM,
-                );
-
-                let selection = String::from_utf8_lossy(&buffer[..len as usize]).to_string();
+                let index = cur_sel as usize;
 
                 if control_data.id == IDC_INPUT_SELECT {
-                    CONFIG.set_input_device(selection)?;
+                    let devices = INPUT_DEVICES.read().unwrap();
+                    if let Some((_, device_id)) = devices.get(index) {
+                        CONFIG.set_input_device(device_id.clone())?;
+                    }
                 } else if control_data.id == IDC_OUTPUT_SELECT {
-                    CONFIG.set_output_device(selection)?;
+                    let devices = OUTPUT_DEVICES.read().unwrap();
+                    if let Some((_, device_id)) = devices.get(index) {
+                        CONFIG.set_output_device(device_id.clone())?;
+                    }
                 }
             }
         },
@@ -582,9 +579,9 @@ fn editor_callback(window: &Window, message: Message) -> Option<isize> {
 /// builds a list box widget for the device manager
 fn build_device_widget(
     window: &Window,
-    devices: &RwLock<Vec<String>>,
+    devices: &RwLock<Vec<(String, Option<String>)>>,
     name: &str,
-    selected: &str,
+    selected: &Option<String>,
     x: i32,
     control_id: u16,
 ) -> Result<()> {
@@ -600,13 +597,13 @@ fn build_device_widget(
 
     let mut selected_output = None;
 
-    for (index, device) in devices.read().unwrap().iter().enumerate() {
-        if device == selected {
+    for (index, (display_name, device_id)) in devices.read().unwrap().iter().enumerate() {
+        if device_id == selected {
             selected_output = Some(index);
         }
 
         // this error is ignored because it is not critical
-        _ = ctrl.add_string_item(device);
+        _ = ctrl.add_string_item(display_name);
     }
 
     if let Some(index) = selected_output {
@@ -619,10 +616,25 @@ fn build_device_widget(
     Ok(())
 }
 
-fn device_by_name(device: &Device, other: &str) -> bool {
-    if let Ok(name) = device.name() {
-        name.contains(other)
-    } else {
-        false
+fn device_by_id(host: &cpal::Host, id: &Option<String>, default: fn(&cpal::Host) -> Option<Device>) -> Option<Device> {
+    match id {
+        None => default(host),
+        Some(id_string) => {
+            match id_string.parse::<cpal::DeviceId>() {
+                Ok(device_id) => {
+                    let device = host.device_by_id(&device_id);
+                    if device.is_none() {
+                        warn!("device with ID '{}' not found, falling back to default", id_string);
+                        default(host)
+                    } else {
+                        device
+                    }
+                }
+                Err(err) => {
+                    warn!("failed to parse device ID '{}': {}, falling back to default", id_string, err);
+                    default(host)
+                }
+            }
+        }
     }
 }
