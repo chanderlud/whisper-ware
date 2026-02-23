@@ -616,25 +616,22 @@ fn build_device_widget(
     Ok(())
 }
 
-fn device_by_id(host: &cpal::Host, id: &Option<String>, default: fn(&cpal::Host) -> Option<Device>) -> Option<Device> {
+fn device_by_id(
+    host: &cpal::Host,
+    id: &Option<String>,
+    default: fn(&cpal::Host) -> Option<Device>,
+) -> Option<Device> {
     match id {
         None => default(host),
-        Some(id_string) => {
-            match id_string.parse::<cpal::DeviceId>() {
-                Ok(device_id) => {
-                    let device = host.device_by_id(&device_id);
-                    if device.is_none() {
-                        warn!("device with ID '{}' not found, falling back to default", id_string);
-                        default(host)
-                    } else {
-                        device
-                    }
-                }
-                Err(err) => {
-                    warn!("failed to parse device ID '{}': {}, falling back to default", id_string, err);
-                    default(host)
-                }
+        Some(id_string) => match id_string.parse::<cpal::DeviceId>() {
+            Ok(device_id) => host.device_by_id(&device_id),
+            Err(err) => {
+                warn!(
+                    "failed to parse device ID '{}': {}, falling back to default",
+                    id_string, err
+                );
+                default(host)
             }
-        }
+        },
     }
 }

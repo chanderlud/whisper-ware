@@ -186,7 +186,6 @@ impl AtomicConfig {
         }
     }
 
-
     /// Notifies writer that the config has changed
     fn mark_dirty(&self) {
         // avoid spamming the channel on repeated writes

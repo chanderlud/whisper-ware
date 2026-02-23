@@ -1,4 +1,6 @@
-use cpal::{BuildStreamError, DefaultStreamConfigError, DeviceIdError, DevicesError, PlayStreamError};
+use cpal::{
+    BuildStreamError, DefaultStreamConfigError, DeviceIdError, DevicesError, PlayStreamError,
+};
 use rtrb::chunks::ChunkError;
 use std::fmt::{Display, Formatter};
 use std::io;
