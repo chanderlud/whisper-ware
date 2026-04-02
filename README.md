@@ -1,5 +1,5 @@
 # WhisperWare
-I developed this software to enhance quiet sounds in competitive games while maintaining a safe overall volume level by compressing and amplifying audio in real time
+I developed this software to enhance quiet sounds in competitive games while maintaining a safe overall volume level by compressing and amplifying audio in real time. Learn more at [chanchan.dev](https://chanchan.dev/work/whisper-ware).
 ## Setup
 1. Download and install a Virtual Audio Cable. I recommend the Lite version of this [VAC](https://vac.muzychenko.net/en/download.htm) as it is free and seems to have reliably good audio quality
 2. In your Windows sound settings, ensure that the input and output of your VAC have the same configuration as your output device. I recommend selecting 48000Hz for all your devices; stereo is required
